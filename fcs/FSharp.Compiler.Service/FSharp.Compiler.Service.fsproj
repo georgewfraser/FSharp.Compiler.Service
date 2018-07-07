@@ -51,6 +51,7 @@
     <FsSrGen Include="$(FSharpSourcesRoot)\fsharp\fsi\FSIstrings.txt">
       <Link>FSIstrings.txt</Link>
     </FsSrGen>
+    <Compile Include="$(MSBuildProjectDirectory)/obj/Release/$(TargetFramework)/FSComp.fs"/>
     <EmbeddedResource Include="$(FSharpSourcesRoot)/fsharp/FSStrings.resx">
       <Link>FSStrings.resx</Link>
       <LogicalName>FSStrings.resources</LogicalName>
