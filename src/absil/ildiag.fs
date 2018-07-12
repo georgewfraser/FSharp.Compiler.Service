@@ -6,7 +6,7 @@ module internal Microsoft.FSharp.Compiler.AbstractIL.Diagnostics
 
 open Internal.Utilities
 
-let diagnosticsLog = ref (Some stdout)
+let diagnosticsLog = ref (Some stderr)
 
 let setDiagnosticsChannel s = diagnosticsLog := s 
 
