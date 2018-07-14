@@ -17218,6 +17218,28 @@ let CheckModuleSignature g cenv m denvAtEnd rootSigOpt implFileTypePriorToSig im
             
             ModuleOrNamespaceExprWithSig(sigFileType, mexpr, m)
 
+let mutable cacheFile = ""
+let mutable cacheEnvs: (pos * TcEnv) list = []
+
+let pruneFocus (focus: pos) (defs: SynModuleDecl list): SynModuleDecl list * pos = 
+    let mutable firstPos = Range.pos0
+    let rec helper (defs: SynModuleDecl list) = 
+        [ for def in defs do 
+            if not(Range.rangeContainsPos def.Range focus) then 
+                eprintfn "Skip %s because it's outside focus %s" (def.Range.ToShortString()) (focus.ToString())
+            else 
+                match def with 
+                | SynModuleDecl.NamespaceFragment(SynModuleOrNamespace(longId, isRecursive, isModule, decls, xmlDoc, attribs, accessibility, range)) ->
+                    yield SynModuleDecl.NamespaceFragment(SynModuleOrNamespace(longId, isRecursive, isModule, helper decls, xmlDoc, attribs, accessibility, range))
+                | SynModuleDecl.NestedModule(info, isRecursive, nestedDefs, isContinuing, range) ->
+                    yield SynModuleDecl.NestedModule(info, isRecursive, helper nestedDefs, isContinuing, range)
+                | _ -> 
+                    eprintfn "Check %A %s because it's inside focus %s" (def.GetType()) (def.Range.ToShortString()) (focus.ToString()) 
+                    if firstPos = Range.pos0 then 
+                        firstPos <- def.Range.Start
+                    yield def ]
+    helper(defs), firstPos
+
 /// Check an entire implementation file
 /// Typecheck, then close the inference scope and then check the file meets its signature (if any)
 let TypeCheckOneImplFile 
@@ -17225,7 +17247,8 @@ let TypeCheckOneImplFile
        (g, niceNameGen, amap, topCcu, checkForErrors, conditionalDefines, tcSink) 
        env 
        (rootSigOpt : ModuleOrNamespaceType option)
-       (ParsedImplFileInput(_, isScript, qualNameOfFile, scopedPragmas, _, implFileFrags, isLastCompiland)) =
+       (ParsedImplFileInput(fileName, isScript, qualNameOfFile, scopedPragmas, _, implFileFrags, isLastCompiland))
+       (focus: pos option) =
 
  eventually {
     let cenv = cenv.Create (g, isScript, niceNameGen, amap, topCcu, false, Option.isSome rootSigOpt, conditionalDefines, tcSink, (LightweightTcValForUsingInBuildMethodCall g))    
@@ -17233,7 +17256,23 @@ let TypeCheckOneImplFile
     let envinner, mtypeAcc = MakeInitialEnv env 
 
     let defs = [ for x in implFileFrags -> SynModuleDecl.NamespaceFragment(x) ]
+
+    // TODO make this more fine-grained
+    // If focus is specified, only check defs that contain focus
+    let defs, envinner = 
+        match focus with 
+        | Some(focus) when fileName = cacheFile -> 
+            let defs, firstPos = pruneFocus focus defs
+            let envsBefore = [for pos, env in cacheEnvs do if Range.posLt pos firstPos then yield env]
+            let lastEnv = List.tryLast envsBefore
+            let envinner = Option.defaultValue envinner lastEnv 
+            defs, envinner
+        | _ -> defs, envinner
     let! mexpr, topAttrs, envsAtEnd = TcModuleOrNamespaceElements cenv ParentNone qualNameOfFile.Range envinner PreXmlDocEmpty None defs
+    if focus.IsNone then 
+        eprintfn "Cache %s" fileName
+        cacheFile <- fileName
+        cacheEnvs <- envsAtEnd
     let envAtEnd = lastEnv envsAtEnd envinner
 
     let implFileTypePriorToSig = !mtypeAcc 

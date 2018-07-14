@@ -719,7 +719,7 @@ val GetInitialTcState:
 
 /// Check one input, returned as an Eventually computation
 val TypeCheckOneInputEventually :
-    checkForErrors:(unit -> bool) * TcConfig * TcImports * TcGlobals * Ast.LongIdent option * NameResolution.TcResultsSink * TcState * Ast.ParsedInput  
+    checkForErrors:(unit -> bool) * TcConfig * TcImports * TcGlobals * Ast.LongIdent option * NameResolution.TcResultsSink * TcState * Ast.ParsedInput * pos option
            -> Eventually<(TcEnv * TopAttribs * TypedImplFile option * ModuleOrNamespaceType) * TcState>
 
 /// Finish the checking of multiple inputs 
@@ -733,7 +733,7 @@ val TypeCheckClosedInputSet: CompilationThreadToken * checkForErrors: (unit -> b
 
 /// Check a single input and finish the checking
 val TypeCheckOneInputAndFinishEventually :
-    checkForErrors: (unit -> bool) * TcConfig * TcImports * TcGlobals * Ast.LongIdent option * NameResolution.TcResultsSink * TcState * Ast.ParsedInput 
+    checkForErrors: (unit -> bool) * TcConfig * TcImports * TcGlobals * Ast.LongIdent option * NameResolution.TcResultsSink * TcState * Ast.ParsedInput * pos option
         -> Eventually<(TcEnv * TopAttribs * TypedImplFile list * ModuleOrNamespaceType list) * TcState>
 
 /// Indicates if we should report a warning
