@@ -16831,6 +16831,7 @@ let rec TcModuleOrNamespaceElementNonMutRec (cenv:cenv) parent typeNames scopem 
               let modDefn = TMDefRec(false, [], [ModuleOrNamespaceBinding.Module(mspec, mexpr)], m)
               PublishModuleDefn cenv env mspec 
               let env = AddLocalSubModuleAndReport cenv.tcSink scopem cenv.g cenv.amap m env mspec
+              let envs = envsAtEnd@[(m.End, env)]
           
               // isContinuingModule is true for all of the following
               //   - the implicit module of a script 
@@ -16839,10 +16840,9 @@ let rec TcModuleOrNamespaceElementNonMutRec (cenv:cenv) parent typeNames scopem 
               //
               // In this case the envAtEnd is the environment at the end of this module, which doesn't contain the module definition itself
               // but does contain the results of all the 'open' declarations and so on.
-              let envsAtEnd = (if isContinuingModule then envsAtEnd else [(m.End, env)])
+              let envsAtEnd = (if isContinuingModule then envsAtEnd else envs)
           
-              // TODO are we missing smaller increments here?
-              return [modDefn], topAttrsNew, [(m.End, env)], envsAtEnd
+              return [modDefn], topAttrsNew, envs, envsAtEnd
       
 
       | SynModuleDecl.NamespaceFragment(SynModuleOrNamespace(longId, isRec, isModule, defs, xml, attribs, vis, m)) ->
@@ -16902,8 +16902,7 @@ let rec TcModuleOrNamespaceElementNonMutRec (cenv:cenv) parent typeNames scopem 
 
                   // Publish the combined module type
                   env.eModuleOrNamespaceTypeAccumulator := CombineCcuContentFragments m [!(env.eModuleOrNamespaceTypeAccumulator); mtypRoot]
-                  // TODO are we missing smaller increments here?
-                  [(m.End, env)]
+                  envsAtEnd@[(m.End, env)]
           
           let modExprRoot = BuildRootModuleExpr enclosingNamespacePath envNS.eCompPath modExpr
 
@@ -16995,6 +16994,7 @@ and TcModuleOrNamespaceElementsMutRec cenv parent typeNames endm envInitial mutR
       loop (match parent with ParentNone -> true | Parent _ -> false) [] defs
 
     let tpenv = emptyUnscopedTyparEnv 
+    // TODO this call needs to return a list
     let mutRecDefnsChecked, envAfter = TcDeclarations.TcMutRecDefinitions cenv envInitial parent typeNames tpenv m scopem mutRecNSInfo mutRecDefns 
 
     // Check the assembly attributes
