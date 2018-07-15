@@ -68,6 +68,9 @@
     <Compile Include="$(FSharpSourcesRoot)\..\tests\service\TokenizerTests.fs">
       <Link>TokenizerTests.fs</Link>
     </Compile>
+    <Compile Include="$(FSharpSourcesRoot)\..\tests\service\LanguageServerInternalTests.fs">
+      <Link>LanguageServerInternalTests.fs</Link>
+    </Compile>
     <Compile Include="$(FSharpSourcesRoot)\..\tests\service\Program.fs" Condition="'$(TargetFramework)' == 'netcoreapp2.0'">
       <Link>Program.fs</Link>
     </Compile>

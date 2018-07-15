@@ -16,6 +16,24 @@ type public LSFile =
 type public LSDelegate = 
     new: unit -> LSDelegate
 
+    /// <summary>
+    /// <para>Get the FSharpProjectOptions implied by a set of command line arguments.</para>
+    /// </summary>
+    ///
+    /// <param name="projectFileName">Used to differentiate between projects and for the base directory of the project.</param>
+    /// <param name="argv">The command line arguments for the project build.</param>
+    /// <param name="loadedTimeStamp">Indicates when the script was loaded into the editing environment,
+    /// so that an 'unload' and 'reload' action will cause the script to be considered as a new project,
+    /// so that references are re-resolved.</param>
+    member GetProjectOptionsFromCommandLineArgs : projectFileName: string * argv: string[] * ?loadedTimeStamp: DateTime * ?extraProjectInfo: obj -> FSharpProjectOptions
+
+    /// <summary>
+    /// <para>Get the FSharpParsingOptions implied by a FSharpProjectOptions.</para>
+    /// </summary>
+    ///
+    /// <param name="argv">The command line arguments for the project build.</param>
+    member GetParsingOptionsFromProjectOptions: FSharpProjectOptions -> FSharpParsingOptions * FSharpErrorInfo list
+
     /// Parse a file
     /// This is useful for operations like navigation that don't require a full typecheck
     /// TODO: implement resolve operation that resolves exported symbols without doing a full typecheck

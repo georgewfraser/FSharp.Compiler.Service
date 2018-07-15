@@ -192,7 +192,7 @@ type LSDelegate() as self =
         | Parser.TypeCheckAborted.Yes  ->  FSharpCheckFileAnswer.Aborted                
         | Parser.TypeCheckAborted.No scope -> FSharpCheckFileAnswer.Succeeded(MakeCheckFileResults(filename, options, builder, scope, dependencyFiles, creationErrors, parseErrors, tcErrors))
     
-    member ic.GetParsingOptionsFromCommandLineArgs(initialSourceFiles, argv, ?isInteractive) =
+    member d.GetParsingOptionsFromCommandLineArgs(initialSourceFiles, argv, ?isInteractive) =
         let isInteractive = defaultArg isInteractive false
         use errorScope = new ErrorScope()
         let tcConfigBuilder = TcConfigBuilder.Initial
@@ -201,10 +201,25 @@ type LSDelegate() as self =
         let sourceFilesNew = ApplyCommandLineArgs(tcConfigBuilder, initialSourceFiles, argv)
         FSharpParsingOptions.FromTcConfigBuidler(tcConfigBuilder, Array.ofList sourceFilesNew, isInteractive), errorScope.Diagnostics
 
-    member ic.GetParsingOptionsFromProjectOptions(options): FSharpParsingOptions * _ =
+    member d.GetParsingOptionsFromProjectOptions(options): FSharpParsingOptions * _ =
         let sourceFiles = List.ofArray options.SourceFiles
         let argv = List.ofArray options.OtherOptions
-        ic.GetParsingOptionsFromCommandLineArgs(sourceFiles, argv, options.UseScriptResolutionRules)
+        d.GetParsingOptionsFromCommandLineArgs(sourceFiles, argv, options.UseScriptResolutionRules)
+
+    member d.GetProjectOptionsFromCommandLineArgs(projectFileName, argv, ?loadedTimeStamp, ?extraProjectInfo: obj) = 
+        let loadedTimeStamp = defaultArg loadedTimeStamp DateTime.MaxValue // Not 'now', we don't want to force reloading
+        { ProjectFileName = projectFileName
+          ProjectId = None
+          SourceFiles = [| |] // the project file names will be inferred from the ProjectOptions
+          OtherOptions = argv 
+          ReferencedProjects= [| |]  
+          IsIncompleteTypeCheckEnvironment = false
+          UseScriptResolutionRules = false
+          LoadTime = loadedTimeStamp
+          UnresolvedReferences = None
+          OriginalLoadReferences=[]
+          ExtraProjectInfo=extraProjectInfo
+          Stamp = None }
 
     /// Parse and typecheck the whole project (the implementation, called recursively as project graph is evaluated)
     member d.ParseAndCheckProjectImpl(options, ctok) : Cancellable<FSharpCheckProjectResults> =
@@ -293,7 +308,9 @@ type LSDelegate() as self =
     /// An open file can be checked incrementally by specifying a "focus"
     member d.Open(_options: FSharpProjectOptions, filename) = 
         let dispose() = openFiles.Remove(filename) |> ignore
-        new LSFile(filename, dispose)
+        let result = new LSFile(filename, dispose)
+        openFiles.Add(filename, result)
+        result
 
     /// Check the entire file, regardless of what has been checked previously
     member d.CheckFully(options: FSharpProjectOptions, file: LSFile, source) =
