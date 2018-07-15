@@ -88,7 +88,8 @@ type public SemanticClassificationType =
 /// It is effectively immutable and not updated: when we re-typecheck we just drop the previous
 /// scope object on the floor and make a new one.
 [<Sealed>]
-type internal TypeCheckInfo
+type internal TypeCheckInfo = 
+    new : _sTcConfig:TcConfig * g:TcGlobals * ccuSigForFile:ModuleOrNamespaceType * thisCcu:CcuThunk * tcImports:TcImports * tcAccessRights:AccessorDomain * projectFileName:string * mainInputFileName:string * sResolutions:TcResolutions * sSymbolUses:TcSymbolUses * sFallback:NameResolutionEnv * loadClosure:LoadClosure option * reactorOps:IReactorOperations * checkAlive:(unit -> bool) * textSnapshotInfo:obj option * implFileOpt:TypedImplFile option * openDeclarations:OpenDeclaration [] -> TypeCheckInfo
 
 /// A handle to the results of CheckFileInProject.
 [<Sealed>]
@@ -381,6 +382,14 @@ module internal Parser =
 
     /// Indicates if the type check got aborted because it is no longer relevant.
     type TypeCheckAborted = Yes | No of TypeCheckInfo
+
+    type internal ErrorHandler =
+        new : reportErrors:bool * mainInputFileName:string * errorSeverityOptions:FSharpErrorSeverityOptions * source:string -> ErrorHandler
+        member AnyErrors : bool
+        member CollectedDiagnostics : FSharpErrorInfo []
+        member ErrorCount : int
+        member ErrorLogger : ErrorLogger
+        member ErrorSeverityOptions : FSharpErrorSeverityOptions with set
 
     val CheckOneFile : parseResults:FSharpParseFileResults * source:string * mainInputFileName:string * projectFileName:string * tcConfig:TcConfig * tcGlobals:TcGlobals * tcImports:TcImports * tcState:TcState * loadClosure:LoadClosure option * backgroundDiagnostics:(PhasedDiagnostic * FSharpErrorSeverity) [] * reactorOps:IReactorOperations * checkAlive:(unit -> bool) * textSnapshotInfo:obj option * userOpName:string -> Async<FSharpErrorInfo [] * TypeCheckAborted>
 

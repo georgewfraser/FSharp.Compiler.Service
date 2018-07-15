@@ -35,4 +35,19 @@ let foo() = "Foo"
         let tooltip = Async.RunSynchronously(results.GetToolTipText(4, 8, "let foo() = \"Foo\"", ["foo"], FSharpTokenTag.Identifier))
         let asText = sprintf "%A" tooltip 
         StringAssert.Contains("val foo : unit -> string", asText)
+        CollectionAssert.IsEmpty(results.Errors)
+
+[<Test>]
+let ``Test find error`` () = 
+    let source = """
+module Foo
+
+let foo(): string = 1
+"""
+    let deleg, sourceFileName, projectFileName, projectOptions, parsingOptions = singleFileProject(source)
+    let sourceFile = deleg.Open(projectOptions, sourceFileName)
+    match Async.RunSynchronously(deleg.CheckFully(projectOptions, sourceFile, source)) with 
+    | FSharpCheckFileAnswer.Aborted -> Assert.Fail("Aborted")
+    | FSharpCheckFileAnswer.Succeeded(results) -> 
+        CollectionAssert.IsNotEmpty(results.Errors)
 

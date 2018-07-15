@@ -11,6 +11,11 @@ open Microsoft.FSharp.Compiler.Range
 open Microsoft.FSharp.Compiler.CompileOps
 open Microsoft.FSharp.Compiler.AbstractIL.Internal.Library 
 open Microsoft.FSharp.Compiler.SourceCodeServices
+open Microsoft.FSharp.Compiler.SourceCodeServices.Parser
+open Microsoft.FSharp.Compiler.ErrorLogger
+open Microsoft.FSharp.Compiler.NameResolution
+open Microsoft.FSharp.Compiler.Tast 
+open Microsoft.FSharp.Compiler.TcGlobals
 
 open Internal.Utilities
 open Internal.Utilities.Collections
@@ -192,6 +197,169 @@ type LSDelegate() as self =
         | Parser.TypeCheckAborted.Yes  ->  FSharpCheckFileAnswer.Aborted                
         | Parser.TypeCheckAborted.No scope -> FSharpCheckFileAnswer.Succeeded(MakeCheckFileResults(filename, options, builder, scope, dependencyFiles, creationErrors, parseErrors, tcErrors))
     
+    // Type check a single file against an initial context, gleaning both errors and intellisense information.
+    let CheckOneFile
+          (parseResults: FSharpParseFileResults,
+           source: string,
+           mainInputFileName: string,
+           projectFileName: string,
+           tcConfig: TcConfig,
+           tcGlobals: TcGlobals,
+           tcImports: TcImports,
+           tcState: TcState,
+           loadClosure: LoadClosure option,
+           // These are the errors and warnings seen by the background compiler for the entire antecedent 
+           backgroundDiagnostics: (PhasedDiagnostic * FSharpErrorSeverity)[],    
+           reactorOps: IReactorOperations,
+           // Used by 'FSharpDeclarationListInfo' to check the IncrementalBuilder is still alive.
+           checkAlive : (unit -> bool),
+           textSnapshotInfo : obj option,
+           userOpName: string) = 
+        
+        async {
+            use _logBlock = Logger.LogBlock LogCompilerFunctionId.Service_CheckOneFile
+
+            match parseResults.ParseTree with 
+            // When processing the following cases, we don't need to type-check
+            | None -> return [||], TypeCheckAborted.Yes
+                   
+            // Run the type checker...
+            | Some parsedMainInput ->
+                // Initialize the error handler 
+                let errHandler = new ErrorHandler(true, mainInputFileName, tcConfig.errorSeverityOptions, source)
+                
+                use _unwindEL = PushErrorLoggerPhaseUntilUnwind (fun _oldLogger -> errHandler.ErrorLogger)
+                use _unwindBP = PushThreadBuildPhaseUntilUnwind BuildPhase.TypeCheck
+            
+                // Apply nowarns to tcConfig (may generate errors, so ensure errorLogger is installed)
+                let tcConfig = ApplyNoWarnsToTcConfig (tcConfig, parsedMainInput,Path.GetDirectoryName mainInputFileName)
+                        
+                // update the error handler with the modified tcConfig
+                errHandler.ErrorSeverityOptions <- tcConfig.errorSeverityOptions
+            
+                // Play background errors and warnings for this file.
+                for (err,sev) in backgroundDiagnostics do
+                    diagnosticSink (err, (sev = FSharpErrorSeverity.Error))
+            
+                // If additional references were brought in by the preprocessor then we need to process them
+                match loadClosure with
+                | Some loadClosure ->
+                    // Play unresolved references for this file.
+                    tcImports.ReportUnresolvedAssemblyReferences(loadClosure.UnresolvedReferences)
+            
+                    // If there was a loadClosure, replay the errors and warnings from resolution, excluding parsing
+                    loadClosure.LoadClosureRootFileDiagnostics |> List.iter diagnosticSink
+            
+                    let fileOfBackgroundError err = (match GetRangeOfDiagnostic (fst err) with Some m-> m.FileName | None -> null)
+                    let sameFile file hashLoadInFile = 
+                        (0 = String.Compare(hashLoadInFile, file, StringComparison.OrdinalIgnoreCase))
+            
+                    //  walk the list of #loads and keep the ones for this file.
+                    let hashLoadsInFile = 
+                        loadClosure.SourceFiles 
+                        |> List.filter(fun (_,ms) -> ms<>[]) // #loaded file, ranges of #load
+            
+                    let hashLoadBackgroundDiagnostics, otherBackgroundDiagnostics = 
+                        backgroundDiagnostics 
+                        |> Array.partition (fun backgroundError -> 
+                            hashLoadsInFile 
+                            |>  List.exists (fst >> sameFile (fileOfBackgroundError backgroundError)))
+            
+                    // Create single errors for the #load-ed files.
+                    // Group errors and warnings by file name.
+                    let hashLoadBackgroundDiagnosticsGroupedByFileName = 
+                        hashLoadBackgroundDiagnostics 
+                        |> Array.map(fun err -> fileOfBackgroundError err,err) 
+                        |> Array.groupBy fst  // fileWithErrors, error list
+            
+                    //  Join the sets and report errors. 
+                    //  It is by-design that these messages are only present in the language service. A true build would report the errors at their
+                    //  spots in the individual source files.
+                    for (fileOfHashLoad, rangesOfHashLoad) in hashLoadsInFile do
+                        for (file, errorGroupedByFileName) in hashLoadBackgroundDiagnosticsGroupedByFileName do
+                            if sameFile file fileOfHashLoad then
+                                for rangeOfHashLoad in rangesOfHashLoad do // Handle the case of two #loads of the same file
+                                    let diagnostics = errorGroupedByFileName |> Array.map(fun (_,(pe,f)) -> pe.Exception,f) // Strip the build phase here. It will be replaced, in total, with TypeCheck
+                                    let errors = [ for (err,sev) in diagnostics do if sev = FSharpErrorSeverity.Error then yield err ]
+                                    let warnings = [ for (err,sev) in diagnostics do if sev = FSharpErrorSeverity.Warning then yield err ]
+                                    
+                                    let message = HashLoadedSourceHasIssues(warnings,errors,rangeOfHashLoad)
+                                    if errors=[] then warning(message)
+                                    else errorR(message)
+            
+                    // Replay other background errors.
+                    for (phasedError,sev) in otherBackgroundDiagnostics do
+                        if sev = FSharpErrorSeverity.Warning then 
+                            warning phasedError.Exception 
+                        else errorR phasedError.Exception
+            
+                | None -> 
+                    // For non-scripts, check for disallow #r and #load.
+                    ApplyMetaCommandsFromInputToTcConfig (tcConfig, parsedMainInput,Path.GetDirectoryName mainInputFileName) |> ignore
+                    
+                // A problem arises with nice name generation, which really should only 
+                // be done in the backend, but is also done in the typechecker for better or worse. 
+                // If we don't do this the NNG accumulates data and we get a memory leak. 
+                tcState.NiceNameGenerator.Reset()
+                
+                // Typecheck the real input.  
+                let sink = TcResultsSinkImpl(tcGlobals, source = source)
+                let! ct = Async.CancellationToken
+            
+                let! resOpt =
+                    async {
+                        try
+                            let checkForErrors() = (parseResults.ParseHadErrors || errHandler.ErrorCount > 0)
+                            // Typecheck is potentially a long running operation. We chop it up here with an Eventually continuation and, at each slice, give a chance
+                            // for the client to claim the result as obsolete and have the typecheck abort.
+                            
+                            let! result = 
+                                TypeCheckOneInputAndFinishEventually(checkForErrors, tcConfig, tcImports, tcGlobals, None, TcResultsSink.WithSink sink, tcState, parsedMainInput)
+                                |> Eventually.repeatedlyProgressUntilDoneOrTimeShareOverOrCanceled maxTimeShareMilliseconds ct (fun ctok f -> f ctok)
+                                |> Eventually.forceAsync  
+                                    (fun work ->
+                                        reactorOps.EnqueueAndAwaitOpAsync(userOpName, "CheckOneFile.Fragment", mainInputFileName, 
+                                            fun ctok -> 
+                                              // This work is not cancellable
+                                              let res = 
+                                                // Reinstall the compilation globals each time we start or restart
+                                                use unwind = new CompilationGlobalsScope (errHandler.ErrorLogger, BuildPhase.TypeCheck)
+                                                work ctok
+                                              cancellable.Return(res)
+                                              ))
+                             
+                            return result |> Option.map (fun ((tcEnvAtEnd, _, implFiles, ccuSigsForFiles), tcState) -> tcEnvAtEnd, implFiles, ccuSigsForFiles, tcState)
+                        with e ->
+                            errorR e
+                            return Some(tcState.TcEnvFromSignatures, [], [NewEmptyModuleOrNamespaceType Namespace], tcState)
+                    }
+                
+                let errors = errHandler.CollectedDiagnostics
+                
+                match resOpt with
+                | Some (tcEnvAtEnd, implFiles, ccuSigsForFiles, tcState) ->
+                    let scope = 
+                        TypeCheckInfo(tcConfig, tcGlobals, 
+                                      List.head ccuSigsForFiles, 
+                                      tcState.Ccu,
+                                      tcImports,
+                                      tcEnvAtEnd.AccessRights,
+                                      projectFileName, 
+                                      mainInputFileName, 
+                                      sink.GetResolutions(), 
+                                      sink.GetSymbolUses(),
+                                      tcEnvAtEnd.NameEnv,
+                                      loadClosure,
+                                      reactorOps,
+                                      checkAlive,
+                                      textSnapshotInfo,
+                                      List.tryHead implFiles,
+                                      sink.GetOpenDeclarations())     
+                    return errors, TypeCheckAborted.No scope
+                | None -> 
+                    return errors, TypeCheckAborted.Yes
+        }
+    
     member d.GetParsingOptionsFromCommandLineArgs(initialSourceFiles, argv, ?isInteractive) =
         let isInteractive = defaultArg isInteractive false
         use errorScope = new ErrorScope()
@@ -256,8 +424,8 @@ type LSDelegate() as self =
             // For scripts, this will have been recorded by GetProjectOptionsFromScript.
             let loadClosure = scriptClosureCacheLock.AcquireLock (fun ltok -> scriptClosureCache.TryGet (ltok, options))
             let! tcErrors, tcFileResult = 
-                Parser.CheckOneFile(parseResults, source, fileName, options.ProjectFileName, tcPrior.TcConfig, tcPrior.TcGlobals, tcPrior.TcImports, 
-                                    tcPrior.TcState, loadClosure, tcPrior.TcErrors, reactorOps, (fun () -> builder.IsAlive), textSnapshotInfo, userOpName)
+                CheckOneFile(parseResults, source, fileName, options.ProjectFileName, tcPrior.TcConfig, tcPrior.TcGlobals, tcPrior.TcImports, 
+                            tcPrior.TcState, loadClosure, tcPrior.TcErrors, reactorOps, (fun () -> builder.IsAlive), textSnapshotInfo, userOpName)
             return MakeCheckFileAnswer(fileName, tcFileResult, options, builder, Array.ofList tcPrior.TcDependencyFiles, creationErrors, parseResults.Errors, tcErrors)
         }
 
