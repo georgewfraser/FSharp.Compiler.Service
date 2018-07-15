@@ -5407,7 +5407,7 @@ let GetInitialTcState(m, ccuName, tcConfig:TcConfig, tcGlobals, tcImports:TcImpo
 
 
 /// Typecheck a single file (or interactive entry into F# Interactive)
-let TypeCheckOneInputEventually (checkForErrors, tcConfig:TcConfig, tcImports:TcImports, tcGlobals, prefixPathOpt, tcSink, tcState: TcState, inp: ParsedInput, focus: pos option) =
+let TypeCheckOneInputEventually (checkForErrors, tcConfig:TcConfig, tcImports:TcImports, tcGlobals, prefixPathOpt, tcSink, tcState: TcState, inp: ParsedInput, focus: pos option, cache: bool) =
 
     eventually {
         try 
@@ -5468,7 +5468,7 @@ let TypeCheckOneInputEventually (checkForErrors, tcConfig:TcConfig, tcImports:Tc
 
               // Typecheck the implementation file 
               let! topAttrs, implFile, _implFileHiddenType, tcEnvAtEnd, createsGeneratedProvidedTypes = 
-                  TypeCheckOneImplFile  (tcGlobals, tcState.tcsNiceNameGen, amap, tcState.tcsCcu, checkForErrors, tcConfig.conditionalCompilationDefines, tcSink) tcImplEnv rootSigOpt file focus
+                  TypeCheckOneImplFile  (tcGlobals, tcState.tcsNiceNameGen, amap, tcState.tcsCcu, checkForErrors, tcConfig.conditionalCompilationDefines, tcSink) tcImplEnv rootSigOpt file focus cache
 
               let hadSig = rootSigOpt.IsSome
               let implFileSigType = SigTypeOfImplFile implFile
@@ -5521,7 +5521,7 @@ let TypeCheckOneInput (ctok, checkForErrors, tcConfig, tcImports, tcGlobals, pre
     // 'use' ensures that the warning handler is restored at the end
     use unwindEL = PushErrorLoggerPhaseUntilUnwind(fun oldLogger -> GetErrorLoggerFilteringByScopedPragmas(false, GetScopedPragmasForInput(inp), oldLogger) )
     use unwindBP = PushThreadBuildPhaseUntilUnwind BuildPhase.TypeCheck
-    TypeCheckOneInputEventually (checkForErrors, tcConfig, tcImports, tcGlobals, prefixPathOpt, TcResultsSink.NoSink, tcState, inp, None) 
+    TypeCheckOneInputEventually (checkForErrors, tcConfig, tcImports, tcGlobals, prefixPathOpt, TcResultsSink.NoSink, tcState, inp, None, false) 
         |> Eventually.force ctok
 
 /// Finish checking multiple files (or one interactive entry into F# Interactive)
@@ -5533,10 +5533,10 @@ let TypeCheckMultipleInputsFinish(results, tcState: TcState) =
     let tcEnvAtEndOfLastFile = (match tcEnvsAtEndFile with h :: _ -> h | _ -> tcState.TcEnvFromSignatures)
     (tcEnvAtEndOfLastFile, topAttrs, implFiles, ccuSigsForFiles), tcState
 
-let TypeCheckOneInputAndFinishEventually(checkForErrors, tcConfig: TcConfig, tcImports, tcGlobals, prefixPathOpt, tcSink, tcState, input, focus) =
+let TypeCheckOneInputAndFinishEventually(checkForErrors, tcConfig: TcConfig, tcImports, tcGlobals, prefixPathOpt, tcSink, tcState, input, focus, cache) =
     eventually {
         Logger.LogBlockStart LogCompilerFunctionId.CompileOps_TypeCheckOneInputAndFinishEventually
-        let! results, tcState =  TypeCheckOneInputEventually(checkForErrors, tcConfig, tcImports, tcGlobals, prefixPathOpt, tcSink, tcState, input, focus)
+        let! results, tcState =  TypeCheckOneInputEventually(checkForErrors, tcConfig, tcImports, tcGlobals, prefixPathOpt, tcSink, tcState, input, focus, cache)
         let result = TypeCheckMultipleInputsFinish([results], tcState)
         Logger.LogBlockStop LogCompilerFunctionId.CompileOps_TypeCheckOneInputAndFinishEventually
         return result

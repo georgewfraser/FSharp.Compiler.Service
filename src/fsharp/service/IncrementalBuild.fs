@@ -1384,7 +1384,7 @@ type IncrementalBuilder(tcGlobals, frameworkTcImports, nonFrameworkAssemblyInput
                              tcAcc.tcGlobals, 
                              None, 
                              TcResultsSink.WithSink sink, 
-                             tcAcc.tcState, input, None)
+                             tcAcc.tcState, input, None, false)
                         
                     /// Only keep the typed interface files when doing a "full" build for fsc.exe, otherwise just throw them away
                     let implFile = if keepAssemblyContents then implFile else None

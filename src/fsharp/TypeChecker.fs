@@ -17248,7 +17248,8 @@ let TypeCheckOneImplFile
        env 
        (rootSigOpt : ModuleOrNamespaceType option)
        (ParsedImplFileInput(fileName, isScript, qualNameOfFile, scopedPragmas, _, implFileFrags, isLastCompiland))
-       (focus: pos option) =
+       (focus: pos option)
+       (cache: bool) =
 
  eventually {
     let cenv = cenv.Create (g, isScript, niceNameGen, amap, topCcu, false, Option.isSome rootSigOpt, conditionalDefines, tcSink, (LightweightTcValForUsingInBuildMethodCall g))    
@@ -17269,7 +17270,7 @@ let TypeCheckOneImplFile
             defs, envinner
         | _ -> defs, envinner
     let! mexpr, topAttrs, envsAtEnd = TcModuleOrNamespaceElements cenv ParentNone qualNameOfFile.Range envinner PreXmlDocEmpty None defs
-    if focus.IsNone then 
+    if focus.IsNone && cache then 
         eprintfn "Cache %s" fileName
         cacheFile <- fileName
         cacheEnvs <- envsAtEnd
