@@ -14,6 +14,7 @@ open Microsoft.FSharp.Compiler.AbstractIL
 open Microsoft.FSharp.Compiler.AbstractIL.IL
 open Microsoft.FSharp.Compiler.AbstractIL.Internal.Library
 open Microsoft.FSharp.Compiler.AbstractIL.ILBinaryReader
+open Microsoft.FSharp.Compiler.AccessibilityLogic
 open Microsoft.FSharp.Compiler 
 open Microsoft.FSharp.Compiler.Ast
 open Microsoft.FSharp.Compiler.Driver
@@ -26,6 +27,7 @@ open Microsoft.FSharp.Compiler.Infos
 open Microsoft.FSharp.Compiler.InfoReader
 open Microsoft.FSharp.Compiler.Tast
 open Microsoft.FSharp.Compiler.Tastops
+open Microsoft.FSharp.Compiler.TypeChecker
 
 /// Represents the reason why the GetDeclarationLocation operation failed.
 [<RequireQualifiedAccess>]
@@ -81,9 +83,18 @@ type public SemanticClassificationType =
     | Operator
     | Disposable
 
+/// A TypeCheckInfo represents everything we get back from the typecheck of a file.
+/// It acts like an in-memory database about the file.
+/// It is effectively immutable and not updated: when we re-typecheck we just drop the previous
+/// scope object on the floor and make a new one.
+[<Sealed>]
+type internal TypeCheckInfo
+
 /// A handle to the results of CheckFileInProject.
 [<Sealed>]
 type public FSharpCheckFileResults =
+    internal new : filename:string * errors:FSharpErrorInfo [] * scopeOptX:TypeCheckInfo option * dependencyFiles:string [] * builderX:IncrementalBuilder option * reactorOpsX:IReactorOperations * keepAssemblyContents:bool -> FSharpCheckFileResults
+
     /// The errors returned by parsing a source file.
     member Errors : FSharpErrorInfo[]
 
@@ -258,6 +269,8 @@ type public FSharpCheckFileResults =
 [<Sealed>]
 type public FSharpCheckProjectResults =
 
+    internal new : projectFileName:string * tcConfigOption:TcConfig option * keepAssemblyContents:bool * errors:FSharpErrorInfo [] * details:(TcGlobals * TcImports * CcuThunk * ModuleOrNamespaceType * TcSymbolUses list * TopAttribs option * IRawFSharpAssemblyData option * ILAssemblyRef * AccessorDomain * TypedImplFile list option * string []) option -> FSharpCheckProjectResults
+
     /// The errors returned by processing the project
     member Errors: FSharpErrorInfo[]
 
@@ -266,6 +279,8 @@ type public FSharpCheckProjectResults =
 
     /// Get a view of the overall contents of the assembly. Only valid to use if HasCriticalErrors is false.
     member AssemblyContents: FSharpAssemblyContents
+
+    member internal RawFSharpAssemblyData: IRawFSharpAssemblyData option
 
     /// Get an optimized view of the overall contents of the assembly. Only valid to use if HasCriticalErrors is false.
     member GetOptimizedAssemblyContents: unit -> FSharpAssemblyContents
@@ -302,6 +317,8 @@ type public FSharpParsingOptions =
       IsExe: bool
     }
     static member Default: FSharpParsingOptions
+    static member internal FromTcConfig : tcConfig:TcConfig * sourceFiles:string [] * isInteractive:bool -> FSharpParsingOptions
+    static member internal FromTcConfigBuidler : tcConfigB:TcConfigBuilder * sourceFiles:string [] * isInteractive:bool -> FSharpParsingOptions
 
 /// <summary>A set of information describing a project or script build configuration.</summary>
 type public FSharpProjectOptions = 
@@ -349,12 +366,23 @@ type public FSharpProjectOptions =
       /// if and only if the stamps are equal
       Stamp: int64 option
     }
+    static member internal UseSameProject: FSharpProjectOptions * FSharpProjectOptions -> bool
+    static member internal AreSameForChecking: FSharpProjectOptions * FSharpProjectOptions -> bool
+    member internal ProjectDirectory: string
          
 /// The result of calling TypeCheckResult including the possibility of abort and background compiler not caught up.
 [<RequireQualifiedAccess>]
 type public FSharpCheckFileAnswer =
     | Aborted // because cancellation caused an abandonment of the operation
     | Succeeded of FSharpCheckFileResults    
+
+module internal Parser = 
+    val parseFile : source:string * fileName:string * options:FSharpParsingOptions * userOpName:string -> FSharpErrorInfo [] * ParsedInput option * bool
+
+    /// Indicates if the type check got aborted because it is no longer relevant.
+    type TypeCheckAborted = Yes | No of TypeCheckInfo
+
+    val CheckOneFile : parseResults:FSharpParseFileResults * source:string * mainInputFileName:string * projectFileName:string * tcConfig:TcConfig * tcGlobals:TcGlobals * tcImports:TcImports * tcState:TcState * loadClosure:LoadClosure option * backgroundDiagnostics:(PhasedDiagnostic * FSharpErrorSeverity) [] * reactorOps:IReactorOperations * checkAlive:(unit -> bool) * textSnapshotInfo:obj option * userOpName:string -> Async<FSharpErrorInfo [] * TypeCheckAborted>
 
 [<Sealed; AutoSerializable(false)>]      
 /// Used to parse and check F# source code.
@@ -440,7 +468,7 @@ type public FSharpChecker =
     /// </param>
     /// <param name="userOpName">An optional string used for tracing compiler operations associated with this request.</param>
     [<Obsolete("This member should no longer be used, please use 'CheckFileInProject'")>]
-    member CheckFileInProjectAllowingStaleCachedResults : parsed: FSharpParseFileResults * filename: string * fileversion: int * source: string * options: FSharpProjectOptions * ?textSnapshotInfo: obj * ?userOpName: string * ?focus: pos * ?cache: bool -> Async<FSharpCheckFileAnswer option>
+    member CheckFileInProjectAllowingStaleCachedResults : parsed: FSharpParseFileResults * filename: string * fileversion: int * source: string * options: FSharpProjectOptions * ?textSnapshotInfo: obj * ?userOpName: string -> Async<FSharpCheckFileAnswer option>
 
     /// <summary>
     /// <para>
@@ -465,7 +493,7 @@ type public FSharpChecker =
     ///     can be used to marginally increase accuracy of intellisense results in some situations.
     /// </param>
     /// <param name="userOpName">An optional string used for tracing compiler operations associated with this request.</param>
-    member CheckFileInProject : parsed: FSharpParseFileResults * filename: string * fileversion: int * source: string * options: FSharpProjectOptions * ?textSnapshotInfo: obj * ?userOpName: string * ?focus: pos * ?cache: bool -> Async<FSharpCheckFileAnswer>
+    member CheckFileInProject : parsed: FSharpParseFileResults * filename: string * fileversion: int * source: string * options: FSharpProjectOptions * ?textSnapshotInfo: obj * ?userOpName: string -> Async<FSharpCheckFileAnswer>
 
     /// <summary>
     /// <para>
@@ -489,7 +517,7 @@ type public FSharpChecker =
     ///     can be used to marginally increase accuracy of intellisense results in some situations.
     /// </param>
     /// <param name="userOpName">An optional string used for tracing compiler operations associated with this request.</param>
-    member ParseAndCheckFileInProject : filename: string * fileversion: int * source: string * options: FSharpProjectOptions * ?textSnapshotInfo: obj * ?userOpName: string * ?focus: pos * ?cache: bool -> Async<FSharpParseFileResults * FSharpCheckFileAnswer>
+    member ParseAndCheckFileInProject : filename: string * fileversion: int * source: string * options: FSharpProjectOptions * ?textSnapshotInfo: obj * ?userOpName: string -> Async<FSharpParseFileResults * FSharpCheckFileAnswer>
 
     /// <summary>
     /// <para>Parse and typecheck all files in a project.</para>
