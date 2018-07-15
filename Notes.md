@@ -3,8 +3,40 @@ The fundamental strategy is to skip things; there are several tricks:
 
 1. When another .fs files has a corresponding .fsi file, we can skip the .fs file.
 2. All expressions after the cursor can be skipped.
-3. As we typecheck each expression, check if it is unchanged, and we can simply re-use the existing check.
+3. Re-use the previous typecheck, up to the expression of interest
 
-The last part is the trickiest; it's essentially a form of memoization. 
-If the contents of the file leading up to and including the next expression have not changed, we can return the last check result.
-It's not necessary to implement this for all expressions; we only need to skip enough of the file that each compilation is fast.
+The last part is the trickiest. Implementation files can be divided into modules, let-declarations, and types:
+
+```fsharp
+module M1 = 
+    let aLet = 1
+    type aType = 
+        member foo: unit -> string
+module M2 = 
+    let anotherLet = "2"
+module M3 = 
+    type anotherType = 
+        member bar: unit -> string
+```
+
+For each `let` and `type`, the typechecker produces a list of new typed ASTs, a list of new attributes, and a new environment that's used to typecheck subsequent declarations.
+
+```fsharp
+module M1 = 
+    let aLet = 1 
+    // aLet
+    type aType = 
+        member foo: unit -> string
+    // aLet, aType
+// M1
+module M2 = 
+    let anotherLet = "2"
+    // M1, anotherLet
+// M1, M2
+module M3 = 
+    type anotherType = 
+        member bar: unit -> string
+    // M1, M2, anotherType
+```
+
+We save each of these environments and use it as a restart point. For example, if we want to re-typecheck `let anotherLet = "2"`, we simply recover the environment `M1` from the previous typecheck, and check `let anotherLet = "2"` by itself.
