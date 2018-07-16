@@ -213,8 +213,7 @@ type LSDelegate() as self =
            reactorOps: IReactorOperations,
            // Used by 'FSharpDeclarationListInfo' to check the IncrementalBuilder is still alive.
            checkAlive : (unit -> bool),
-           textSnapshotInfo : obj option,
-           userOpName: string) = 
+           textSnapshotInfo : obj option) = 
         
         async {
             use _logBlock = Logger.LogBlock LogCompilerFunctionId.Service_CheckOneFile
@@ -304,60 +303,45 @@ type LSDelegate() as self =
                 
                 // Typecheck the real input.  
                 let sink = TcResultsSinkImpl(tcGlobals, source = source)
-                let! ct = Async.CancellationToken
             
-                let! resOpt =
-                    async {
-                        try
-                            let checkForErrors() = (parseResults.ParseHadErrors || errHandler.ErrorCount > 0)
-                            // Typecheck is potentially a long running operation. We chop it up here with an Eventually continuation and, at each slice, give a chance
-                            // for the client to claim the result as obsolete and have the typecheck abort.
-                            
-                            let! result = 
-                                TypeCheckOneInputAndFinishEventually(checkForErrors, tcConfig, tcImports, tcGlobals, None, TcResultsSink.WithSink sink, tcState, parsedMainInput)
-                                |> Eventually.repeatedlyProgressUntilDoneOrTimeShareOverOrCanceled maxTimeShareMilliseconds ct (fun ctok f -> f ctok)
-                                |> Eventually.forceAsync  
-                                    (fun work ->
-                                        reactorOps.EnqueueAndAwaitOpAsync(userOpName, "CheckOneFile.Fragment", mainInputFileName, 
-                                            fun ctok -> 
-                                              // This work is not cancellable
-                                              let res = 
-                                                // Reinstall the compilation globals each time we start or restart
-                                                use unwind = new CompilationGlobalsScope (errHandler.ErrorLogger, BuildPhase.TypeCheck)
-                                                work ctok
-                                              cancellable.Return(res)
-                                              ))
-                             
-                            return result |> Option.map (fun ((tcEnvAtEnd, _, implFiles, ccuSigsForFiles), tcState) -> tcEnvAtEnd, implFiles, ccuSigsForFiles, tcState)
-                        with e ->
-                            errorR e
-                            return Some(tcState.TcEnvFromSignatures, [], [NewEmptyModuleOrNamespaceType Namespace], tcState)
-                    }
+                let tcEnvAtEnd, implFiles, ccuSigsForFiles, tcState =
+                    try
+                        let checkForErrors() = (parseResults.ParseHadErrors || errHandler.ErrorCount > 0)
+                        // Typecheck is potentially a long running operation. We chop it up here with an Eventually continuation and, at each slice, give a chance
+                        // for the client to claim the result as obsolete and have the typecheck abort.
+                        let check = TypeCheckOneInputAndFinishEventually(checkForErrors, tcConfig, tcImports, tcGlobals, None, TcResultsSink.WithSink sink, tcState, parsedMainInput)
+                        // TODO this defeats cancellation, convert to async at a lower level
+                        let rec loop(check) = 
+                            match check with 
+                            | Done(value) -> value
+                            | NotYetDone(work) -> 
+                                let check = work(ctok)
+                                loop(check)
+                        let (tcEnvAtEnd, _, implFiles, ccuSigsForFiles), tcState = loop(check)
+                        tcEnvAtEnd, implFiles, ccuSigsForFiles, tcState
+                    with e ->
+                        errorR e
+                        tcState.TcEnvFromSignatures, [], [NewEmptyModuleOrNamespaceType Namespace], tcState
                 
                 let errors = errHandler.CollectedDiagnostics
-                
-                match resOpt with
-                | Some (tcEnvAtEnd, implFiles, ccuSigsForFiles, tcState) ->
-                    let scope = 
-                        TypeCheckInfo(tcConfig, tcGlobals, 
-                                      List.head ccuSigsForFiles, 
-                                      tcState.Ccu,
-                                      tcImports,
-                                      tcEnvAtEnd.AccessRights,
-                                      projectFileName, 
-                                      mainInputFileName, 
-                                      sink.GetResolutions(), 
-                                      sink.GetSymbolUses(),
-                                      tcEnvAtEnd.NameEnv,
-                                      loadClosure,
-                                      reactorOps,
-                                      checkAlive,
-                                      textSnapshotInfo,
-                                      List.tryHead implFiles,
-                                      sink.GetOpenDeclarations())     
-                    return errors, TypeCheckAborted.No scope
-                | None -> 
-                    return errors, TypeCheckAborted.Yes
+                let scope = 
+                    TypeCheckInfo(tcConfig, tcGlobals, 
+                                    List.head ccuSigsForFiles, 
+                                    tcState.Ccu,
+                                    tcImports,
+                                    tcEnvAtEnd.AccessRights,
+                                    projectFileName, 
+                                    mainInputFileName, 
+                                    sink.GetResolutions(), 
+                                    sink.GetSymbolUses(),
+                                    tcEnvAtEnd.NameEnv,
+                                    loadClosure,
+                                    reactorOps,
+                                    checkAlive,
+                                    textSnapshotInfo,
+                                    List.tryHead implFiles,
+                                    sink.GetOpenDeclarations())     
+                return errors, TypeCheckAborted.No scope
         }
     
     member d.GetParsingOptionsFromCommandLineArgs(initialSourceFiles, argv, ?isInteractive) =
@@ -416,8 +400,7 @@ type LSDelegate() as self =
          textSnapshotInfo: obj option,
          builder: IncrementalBuilder,
          tcPrior: PartialCheckResults,
-         creationErrors: FSharpErrorInfo[],
-         userOpName: string) = 
+         creationErrors: FSharpErrorInfo[]) = 
     
         async {
             // Get additional script #load closure information if applicable.
@@ -425,12 +408,12 @@ type LSDelegate() as self =
             let loadClosure = scriptClosureCacheLock.AcquireLock (fun ltok -> scriptClosureCache.TryGet (ltok, options))
             let! tcErrors, tcFileResult = 
                 CheckOneFile(parseResults, source, fileName, options.ProjectFileName, tcPrior.TcConfig, tcPrior.TcGlobals, tcPrior.TcImports, 
-                            tcPrior.TcState, loadClosure, tcPrior.TcErrors, reactorOps, (fun () -> builder.IsAlive), textSnapshotInfo, userOpName)
+                            tcPrior.TcState, loadClosure, tcPrior.TcErrors, reactorOps, (fun () -> builder.IsAlive), textSnapshotInfo)
             return MakeCheckFileAnswer(fileName, tcFileResult, options, builder, Array.ofList tcPrior.TcDependencyFiles, creationErrors, parseResults.Errors, tcErrors)
         }
 
     /// Type-check the result obtained by parsing. Force the evaluation of the antecedent type checking context if needed.
-    member bc.CheckFileInProject(parseResults: FSharpParseFileResults, filename, source, options, textSnapshotInfo, userOpName) =
+    member bc.CheckFileInProject(parseResults: FSharpParseFileResults, filename, source, options, textSnapshotInfo) =
         async {
             let! builderOpt,creationErrors, decrement = toAsync(getOrCreateBuilderAndKeepAlive(options))
             use _unwind = decrement
@@ -440,7 +423,7 @@ type LSDelegate() as self =
                 let! tcPrior = toAsync(builder.GetCheckResultsBeforeFileInProject (ctok, filename))
                 let parseTreeOpt = parseResults.ParseTree |> Option.map builder.DeduplicateParsedInputModuleNameInProject
                 let parseResultsAterDeDuplication = FSharpParseFileResults(parseResults.Errors, parseTreeOpt, parseResults.ParseHadErrors, parseResults.DependencyFiles)
-                let! checkAnswer = bc.CheckOneFileImpl(parseResultsAterDeDuplication, source, filename, options, textSnapshotInfo, builder, tcPrior, creationErrors, userOpName)
+                let! checkAnswer = bc.CheckOneFileImpl(parseResultsAterDeDuplication, source, filename, options, textSnapshotInfo, builder, tcPrior, creationErrors)
                 return checkAnswer
         }
 
@@ -485,7 +468,7 @@ type LSDelegate() as self =
         async {
             let parseOptions, _ = d.GetParsingOptionsFromProjectOptions(options)
             let parsed = d.Parse(parseOptions, file.FileName, source)
-            let! result = d.CheckFileInProject(parsed, file.FileName, source, options, None, "")
+            let! result = d.CheckFileInProject(parsed, file.FileName, source, options, None)
             return result
         }
 
