@@ -392,7 +392,7 @@ type LSDelegate() as self =
                                                    tcProj.TcEnvAtEnd.AccessRights, tcAssemblyExprOpt, Array.ofList tcProj.TcDependencyFiles))
       }
 
-    member bc.CheckOneFileImpl
+    member d.CheckOneFileImpl
         (parseResults: FSharpParseFileResults,
          source: string,
          fileName: string,
@@ -413,7 +413,7 @@ type LSDelegate() as self =
         }
 
     /// Type-check the result obtained by parsing. Force the evaluation of the antecedent type checking context if needed.
-    member bc.CheckFileInProject(parseResults: FSharpParseFileResults, filename, source, options, textSnapshotInfo) =
+    member d.CheckFileInProject(parseResults: FSharpParseFileResults, filename, source, options, textSnapshotInfo) =
         async {
             let! builderOpt,creationErrors, decrement = toAsync(getOrCreateBuilderAndKeepAlive(options))
             use _unwind = decrement
@@ -423,7 +423,7 @@ type LSDelegate() as self =
                 let! tcPrior = toAsync(builder.GetCheckResultsBeforeFileInProject (ctok, filename))
                 let parseTreeOpt = parseResults.ParseTree |> Option.map builder.DeduplicateParsedInputModuleNameInProject
                 let parseResultsAterDeDuplication = FSharpParseFileResults(parseResults.Errors, parseTreeOpt, parseResults.ParseHadErrors, parseResults.DependencyFiles)
-                let! checkAnswer = bc.CheckOneFileImpl(parseResultsAterDeDuplication, source, filename, options, textSnapshotInfo, builder, tcPrior, creationErrors)
+                let! checkAnswer = d.CheckOneFileImpl(parseResultsAterDeDuplication, source, filename, options, textSnapshotInfo, builder, tcPrior, creationErrors)
                 return checkAnswer
         }
 
