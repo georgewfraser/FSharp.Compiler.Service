@@ -16747,11 +16747,11 @@ let rec TcModuleOrNamespaceElementNonMutRec (cenv:cenv) parent typeNames scopem 
 
       | SynModuleDecl.ModuleAbbrev (id, p, m) -> 
           let env = MutRecBindingChecking.TcModuleAbbrevDecl cenv scopem env (id, p, m)
-          return [], [], [(m.End, env)], [(m.End, env)]
+          return [], [], env, env
 
       | SynModuleDecl.Exception (edef, m) -> 
           let binds, decl, env = TcExceptionDeclarations.TcExnDefn cenv env parent (edef, scopem)
-          return [TMDefRec(true, [decl], binds |> List.map ModuleOrNamespaceBinding.Binding, m)], [], [(m.End, env)], [(m.End, env)]
+          return [TMDefRec(true, [decl], binds |> List.map ModuleOrNamespaceBinding.Binding, m)], [], env, env
 
       | SynModuleDecl.Types (typeDefs, m) -> 
           let scopem = unionRanges m scopem
@@ -16760,19 +16760,19 @@ let rec TcModuleOrNamespaceElementNonMutRec (cenv:cenv) parent typeNames scopem 
           // Check the non-escaping condition
           TcMutRecDefnsEscapeCheck mutRecDefnsChecked env
 
-          return [TcMutRecDefsFinish cenv mutRecDefnsChecked m], [], [(m.End, envAfter)], [(m.End, envAfter)]
+          return [TcMutRecDefsFinish cenv mutRecDefnsChecked m], [], envAfter, envAfter
 
       | SynModuleDecl.Open (LongIdentWithDots(mp, _), m) -> 
           let scopem = unionRanges m.EndRange scopem
           let env = TcOpenDecl cenv.tcSink cenv.g cenv.amap m scopem env mp
-          return [], [], [(m.End, env)], [(m.End, env)]
+          return [], [], env, env
 
       | SynModuleDecl.Let (letrec, binds, m) -> 
 
           match parent with
           | ParentNone ->
                 CheckLetOrDoInNamespace binds m
-                return [], [], [(m.End, env)], [(m.End, env)]
+                return [], [], env, env
 
           | Parent parentModule -> 
               let containerInfo = ModuleOrNamespaceContainerInfo(parentModule)
@@ -16780,19 +16780,19 @@ let rec TcModuleOrNamespaceElementNonMutRec (cenv:cenv) parent typeNames scopem 
                 let scopem = unionRanges m scopem
                 let binds = binds |> List.map (fun bind -> RecDefnBindingInfo(containerInfo, NoNewSlots, ModuleOrMemberBinding, bind))
                 let binds, env, _ = TcLetrec  WarnOnOverrides cenv env tpenv (binds, m, scopem)
-                return [TMDefRec(true, [], binds |> List.map ModuleOrNamespaceBinding.Binding, m)], [], [(m.End, env)], [(m.End, env)]
+                return [TMDefRec(true, [], binds |> List.map ModuleOrNamespaceBinding.Binding, m)], [], env, env
               else 
                 let binds, env, _ = TcLetBindings cenv env containerInfo ModuleOrMemberBinding tpenv (binds, m, scopem)
-                return binds, [], [(m.End, env)], [(m.End, env)]
+                return binds, [], env, env
 
       | SynModuleDecl.DoExpr _ -> return! failwith "unreachable"
 
-      | SynModuleDecl.Attributes (synAttrs, m) -> 
+      | SynModuleDecl.Attributes (synAttrs, _) -> 
           let attrs, _ = TcAttributesWithPossibleTargets false cenv env AttributeTargets.Top synAttrs
-          return [], attrs, [(m.End, env)], [(m.End, env)]
+          return [], attrs, env, env
 
-      | SynModuleDecl.HashDirective (_, m) -> 
-          return [], [], [(m.End, env)], [(m.End, env)]
+      | SynModuleDecl.HashDirective (_, _) -> 
+          return [], [], env, env
 
       | SynModuleDecl.NestedModule(compInfo, isRec, mdefs, isContinuingModule, m) ->
 
@@ -16824,14 +16824,13 @@ let rec TcModuleOrNamespaceElementNonMutRec (cenv:cenv) parent typeNames scopem 
               let mspec = NewModuleOrNamespace (Some env.eCompPath) vis id (xml.ToXmlDoc()) modAttrs (MaybeLazy.Strict (NewEmptyModuleOrNamespaceType modKind))
 
               // Now typecheck. 
-              let! mexpr, topAttrsNew, envsAtEnd = TcModuleOrNamespaceElements cenv (Parent (mkLocalModRef mspec)) endm envForModule xml None mdefs 
+              let! mexpr, topAttrsNew, envAtEnd = TcModuleOrNamespaceElements cenv (Parent (mkLocalModRef mspec)) endm envForModule xml None mdefs 
 
               // Get the inferred type of the decls and record it in the mspec. 
               mspec.entity_modul_contents <- MaybeLazy.Strict !mtypeAcc  
               let modDefn = TMDefRec(false, [], [ModuleOrNamespaceBinding.Module(mspec, mexpr)], m)
               PublishModuleDefn cenv env mspec 
               let env = AddLocalSubModuleAndReport cenv.tcSink scopem cenv.g cenv.amap m env mspec
-              let envs = envsAtEnd@[(m.End, env)]
           
               // isContinuingModule is true for all of the following
               //   - the implicit module of a script 
@@ -16840,9 +16839,9 @@ let rec TcModuleOrNamespaceElementNonMutRec (cenv:cenv) parent typeNames scopem 
               //
               // In this case the envAtEnd is the environment at the end of this module, which doesn't contain the module definition itself
               // but does contain the results of all the 'open' declarations and so on.
-              let envsAtEnd = (if isContinuingModule then envsAtEnd else envs)
+              let envAtEnd = (if isContinuingModule then envAtEnd else env)
           
-              return [modDefn], topAttrsNew, envs, envsAtEnd
+              return [modDefn], topAttrsNew, env, envAtEnd
       
 
       | SynModuleDecl.NamespaceFragment(SynModuleOrNamespace(longId, isRec, isModule, defs, xml, attribs, vis, m)) ->
@@ -16884,13 +16883,13 @@ let rec TcModuleOrNamespaceElementNonMutRec (cenv:cenv) parent typeNames scopem 
           let nsInfo = Some (mspecNSOpt, envNS.eModuleOrNamespaceTypeAccumulator)
           let mutRecNSInfo = if isRec then nsInfo else None
 
-          let! modExpr, topAttrs, envsAtEnd = TcModuleOrNamespaceElements cenv parent endm envNS xml mutRecNSInfo defs
+          let! modExpr, topAttrs, envAtEnd = TcModuleOrNamespaceElements cenv parent endm envNS xml mutRecNSInfo defs
 
           MutRecBindingChecking.TcMutRecDefns_UpdateNSContents nsInfo
           
-          let envs = 
+          let env = 
               if isNil enclosingNamespacePath then 
-                  envsAtEnd
+                  envAtEnd
               else
                   let env = AddLocalRootModuleOrNamespace cenv.tcSink cenv.g cenv.amap m env mtypRoot
 
@@ -16902,19 +16901,19 @@ let rec TcModuleOrNamespaceElementNonMutRec (cenv:cenv) parent typeNames scopem 
 
                   // Publish the combined module type
                   env.eModuleOrNamespaceTypeAccumulator := CombineCcuContentFragments m [!(env.eModuleOrNamespaceTypeAccumulator); mtypRoot]
-                  envsAtEnd@[(m.End, env)]
+                  env
           
           let modExprRoot = BuildRootModuleExpr enclosingNamespacePath envNS.eCompPath modExpr
 
-          return [modExprRoot], topAttrs, envs, envsAtEnd
+          return [modExprRoot], topAttrs, env, envAtEnd
 
     with exn -> 
         errorRecovery exn synDecl.Range 
-        return [], [], [(synDecl.Range.End, env)], [(synDecl.Range.End, env)]
+        return [], [], env, env
  }
  
 /// The non-mutually recursive case for a sequence of declarations
-and TcModuleOrNamespaceElementsNonMutRec cenv parent typeNames endm (env: TcEnv, exprsSoFar, attrsSoFar, envs: (pos * TcEnv) list, envsAtEnd: (pos * TcEnv) list) (moreDefs: SynModuleDecl list) =
+and TcModuleOrNamespaceElementsNonMutRec cenv parent typeNames endm (exprsSoFar, attrsSoFar, env: TcEnv, envAtEnd: TcEnv) (moreDefs: SynModuleDecl list) =
   eventually {
     match moreDefs with 
     | (firstDef :: otherDefs) ->
@@ -16926,12 +16925,11 @@ and TcModuleOrNamespaceElementsNonMutRec cenv parent typeNames endm (env: TcEnv,
         // Possibly better:
         //let scopem = unionRanges h1.Range.EndRange endm
 
-        let! firstExpr', firstAttr', envs', envsAtEnd' = TcModuleOrNamespaceElementNonMutRec cenv parent typeNames scopem env firstDef
-        let env = lastEnv envs' env
+        let! firstExpr', firstAttr', env', envAtEnd' = TcModuleOrNamespaceElementNonMutRec cenv parent typeNames scopem env firstDef
         // tail recursive 
-        return! TcModuleOrNamespaceElementsNonMutRec  cenv parent typeNames endm ( env, exprsSoFar@firstExpr', attrsSoFar@firstAttr', envs@envs', envsAtEnd@envsAtEnd') otherDefs
+        return! TcModuleOrNamespaceElementsNonMutRec  cenv parent typeNames endm (exprsSoFar@firstExpr', attrsSoFar@firstAttr', env', envAtEnd') otherDefs
     | [] -> 
-        return exprsSoFar, attrsSoFar, envsAtEnd
+        return exprsSoFar, attrsSoFar, envAtEnd
  }
  
 /// The mutually recursive case for a sequence of declarations (and nested modules)
@@ -17005,7 +17003,7 @@ and TcModuleOrNamespaceElementsMutRec cenv parent typeNames endm envInitial mutR
     let modExpr = TcMutRecDefsFinish cenv mutRecDefnsChecked m 
 
     // TODO are we missing smaller increments here?
-    return [modExpr], attrs, [(m.End, envAfter)], [(m.End, envAfter)]
+    return [modExpr], attrs, envAfter, envAfter
 
  }
 
@@ -17036,16 +17034,16 @@ and TcModuleOrNamespaceElements cenv parent endm env xml mutRecNSInfo defs =
 
     match mutRecNSInfo with 
     | Some _ -> 
-        let! exprs, topAttrsNew, _, envsAtEnd = TcModuleOrNamespaceElementsMutRec cenv parent typeNames endm env mutRecNSInfo defs
+        let! exprs, topAttrsNew, _, envAtEnd = TcModuleOrNamespaceElementsMutRec cenv parent typeNames endm env mutRecNSInfo defs
         // Apply the functions for each declaration to build the overall expression-builder 
         let mexpr = TMDefs(exprs) 
-        return (mexpr, topAttrsNew, envsAtEnd)
+        return (mexpr, topAttrsNew, envAtEnd)
 
     | None -> 
-        let! exprs, attrs, envsAtEnd = TcModuleOrNamespaceElementsNonMutRec cenv parent typeNames endm (env, [], [], [], []) defs 
+        let! exprs, attrs, envAtEnd = TcModuleOrNamespaceElementsNonMutRec cenv parent typeNames endm ([], [], env, env) defs 
 
         let mexpr = TMDefs(exprs)
-        return (mexpr, attrs, envsAtEnd)
+        return (mexpr, attrs, envAtEnd)
   }
 
 
@@ -17234,9 +17232,7 @@ let TypeCheckOneImplFile
 
     let defs = [ for x in implFileFrags -> SynModuleDecl.NamespaceFragment(x) ]
 
-    let! mexpr, topAttrs, envsAtEnd = TcModuleOrNamespaceElements cenv ParentNone qualNameOfFile.Range envinner PreXmlDocEmpty None defs
-    
-    let envAtEnd = lastEnv envsAtEnd envinner
+    let! mexpr, topAttrs, envAtEnd = TcModuleOrNamespaceElements cenv ParentNone qualNameOfFile.Range envinner PreXmlDocEmpty None defs
 
     let implFileTypePriorToSig = !mtypeAcc 
 
