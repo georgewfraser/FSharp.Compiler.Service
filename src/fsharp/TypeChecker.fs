@@ -16729,12 +16729,12 @@ let CheckLetOrDoInNamespace binds m =
     | _ -> 
         error(NumberedError(FSComp.SR.tcNamespaceCannotContainValues(), binds.Head.RangeOfHeadPat)) 
 
-let lastEnv posEnvPairs initialEnv = 
-    if List.length posEnvPairs > 0 then 
-        List.last posEnvPairs |> snd
-    else 
-        initialEnv
-    
+type RecoveryPoint = {
+    pos: pos 
+    expr: string
+    env: TcEnv
+}
+
 /// The non-mutually recursive case for a declaration
 let rec TcModuleOrNamespaceElementNonMutRec (cenv:cenv) parent typeNames scopem env synDecl =
   eventually {
@@ -17045,7 +17045,307 @@ and TcModuleOrNamespaceElements cenv parent endm env xml mutRecNSInfo defs =
         let mexpr = TMDefs(exprs)
         return (mexpr, attrs, envAtEnd)
   }
+    
+/// The non-mutually recursive case for a declaration
+let rec RecoverModuleOrNamespaceElementNonMutRec (cenv:cenv) parent typeNames scopem env synDecl =
+    cenv.synArgNameGenerator.Reset()
+    let tpenv = emptyUnscopedTyparEnv
 
+    //printfn "----------\nCHECKING, e = %+A\n------------------\n" e
+    try 
+      match ElimModuleDoBinding synDecl with 
+
+      | SynModuleDecl.ModuleAbbrev (id, p, m) -> 
+          let env = MutRecBindingChecking.RecoverModuleAbbrevDecl cenv scopem env (id, p, m)
+          [], [], env, env
+
+      | SynModuleDecl.Exception (edef, m) -> 
+          let binds, decl, env = RecoverExceptionDeclarations.RecoverExnDefn cenv env parent (edef, scopem)
+          [TMDefRec(true, [decl], binds |> List.map ModuleOrNamespaceBinding.Binding, m)], [], env, env
+
+      | SynModuleDecl.Types (typeDefs, m) -> 
+          let scopem = unionRanges m scopem
+          let mutRecDefns = typeDefs |> List.map MutRecShape.Tycon
+          let mutRecDefnsChecked, envAfter = RecoverDeclarations.RecoverMutRecDefinitions cenv env parent typeNames tpenv m scopem None mutRecDefns
+          // Check the non-escaping condition
+          RecoverMutRecDefnsEscapeCheck mutRecDefnsChecked env
+
+          [RecoverMutRecDefsFinish cenv mutRecDefnsChecked m], [], envAfter, envAfter
+
+      | SynModuleDecl.Open (LongIdentWithDots(mp, _), m) -> 
+          let scopem = unionRanges m.EndRange scopem
+          let env = RecoverOpenDecl cenv.tcSink cenv.g cenv.amap m scopem env mp
+          [], [], env, env
+
+      | SynModuleDecl.Let (letrec, binds, m) -> 
+
+          match parent with
+          | ParentNone ->
+                CheckLetOrDoInNamespace binds m
+                [], [], env, env
+
+          | Parent parentModule -> 
+              let containerInfo = ModuleOrNamespaceContainerInfo(parentModule)
+              if letrec then 
+                let scopem = unionRanges m scopem
+                let binds = binds |> List.map (fun bind -> RecDefnBindingInfo(containerInfo, NoNewSlots, ModuleOrMemberBinding, bind))
+                let binds, env, _ = RecoverLetrec  WarnOnOverrides cenv env tpenv (binds, m, scopem)
+                [TMDefRec(true, [], binds |> List.map ModuleOrNamespaceBinding.Binding, m)], [], env, env
+              else 
+                let binds, env, _ = RecoverLetBindings cenv env containerInfo ModuleOrMemberBinding tpenv (binds, m, scopem)
+                binds, [], env, env
+
+      | SynModuleDecl.DoExpr _ -> failwith "unreachable"
+
+      | SynModuleDecl.Attributes (synAttrs, _) -> 
+          let attrs, _ = RecoverAttributesWithPossibleTargets false cenv env AttributeTargets.Top synAttrs
+          [], attrs, env, env
+
+      | SynModuleDecl.HashDirective (_, _) -> 
+          [], [], env, env
+
+      | SynModuleDecl.NestedModule(compInfo, isRec, mdefs, isContinuingModule, m) ->
+
+          // Treat 'module rec M = ...' as a single mutually recursive definition group 'module M = ...'
+          if isRec then 
+              assert (not isContinuingModule)
+              let modDecl = SynModuleDecl.NestedModule(compInfo, false, mdefs, isContinuingModule, m)
+              RecoverModuleOrNamespaceElementsMutRec cenv parent typeNames m env None [modDecl]
+          else
+              let (ComponentInfo(attribs, _parms, _constraints, longPath, xml, _, vis, im)) = compInfo
+              let id = ComputeModuleName longPath
+
+              let modAttrs = RecoverAttributes cenv env AttributeTargets.ModuleDecl attribs
+              let modKind = EstablishTypeDefinitionCores.ComputeModuleOrNamespaceKind cenv.g true typeNames modAttrs id.idText
+              let modName = EstablishTypeDefinitionCores.AdjustModuleName modKind id.idText
+              CheckForDuplicateConcreteType env modName im
+              CheckForDuplicateModule env id.idText id.idRange
+              let vis, _ = ComputeAccessAndCompPath env None id.idRange vis None parent
+             
+              let endm = m.EndRange
+              let id = ident (modName, id.idRange)
+
+              CheckNamespaceModuleOrTypeName cenv.g id
+
+              let envForModule, mtypeAcc = MakeInnerEnv env id modKind
+    
+              // Create the new module specification to hold the accumulated results of the type of the module 
+              // Also record this in the environment as the accumulator 
+              let mspec = NewModuleOrNamespace (Some env.eCompPath) vis id (xml.ToXmlDoc()) modAttrs (MaybeLazy.Strict (NewEmptyModuleOrNamespaceType modKind))
+
+              // Now typecheck. 
+              let mexpr, topAttrsNew, envAtEnd = RecoverModuleOrNamespaceElements cenv (Parent (mkLocalModRef mspec)) endm envForModule xml None mdefs 
+
+              // Get the inferred type of the decls and record it in the mspec. 
+              mspec.entity_modul_contents <- MaybeLazy.Strict !mtypeAcc  
+              let modDefn = TMDefRec(false, [], [ModuleOrNamespaceBinding.Module(mspec, mexpr)], m)
+              PublishModuleDefn cenv env mspec 
+              let env = AddLocalSubModuleAndReport cenv.tcSink scopem cenv.g cenv.amap m env mspec
+          
+              // isContinuingModule is true for all of the following
+              //   - the implicit module of a script 
+              //   - the major 'module' declaration for a file stating with 'module X.Y' 
+              //   - an interactive entry for F# Interactive 
+              //
+              // In this case the envAtEnd is the environment at the end of this module, which doesn't contain the module definition itself
+              // but does contain the results of all the 'open' declarations and so on.
+              let envAtEnd = (if isContinuingModule then envAtEnd else env)
+          
+              [modDefn], topAttrsNew, env, envAtEnd
+      
+
+      | SynModuleDecl.NamespaceFragment(SynModuleOrNamespace(longId, isRec, isModule, defs, xml, attribs, vis, m)) ->
+
+          if !progress then dprintn ("Typecheck implementation " + textOfLid longId)
+          let endm = m.EndRange
+
+          do for id in longId do 
+               CheckNamespaceModuleOrTypeName cenv.g id
+
+          // Logically speaking, this changes 
+          //    module [rec] A.B.M
+          //    ...
+          // to 
+          //    namespace [rec] A.B
+          //      module M = ...
+          let enclosingNamespacePath, defs = 
+              if isModule then 
+                  let nsp, modName = List.frontAndBack longId
+                  let modDecl = [SynModuleDecl.NestedModule(ComponentInfo(attribs, [], [], [modName], xml, false, vis, m), false, defs, true, m)] 
+                  nsp, modDecl
+              else 
+                  longId, defs
+
+          let envNS = LocateEnv cenv.topCcu env enclosingNamespacePath
+          let envNS = ImplicitlyOpenOwnNamespace cenv.tcSink cenv.g cenv.amap m enclosingNamespacePath envNS
+
+          let mtypNS = !(envNS.eModuleOrNamespaceTypeAccumulator)
+          let mtypRoot, mspecNSs = BuildRootModuleType enclosingNamespacePath envNS.eCompPath mtypNS
+          let mspecNSOpt = List.tryHead mspecNSs
+
+          mspecNSs |> List.iter (fun mspec ->
+            let modref = mkLocalModRef mspec
+            let item = Item.ModuleOrNamespaces [modref]
+            CallNameResolutionSink cenv.tcSink (mspec.Range, env.NameEnv, item, item, emptyTyparInst, ItemOccurence.Binding, env.DisplayEnv, env.eAccessRights))
+
+          // For 'namespace rec' and 'module rec' we add the thing being defined 
+          let envNS = if isRec then AddLocalRootModuleOrNamespace cenv.tcSink cenv.g cenv.amap m envNS mtypRoot else envNS
+          let nsInfo = Some (mspecNSOpt, envNS.eModuleOrNamespaceTypeAccumulator)
+          let mutRecNSInfo = if isRec then nsInfo else None
+
+          let modExpr, topAttrs, envAtEnd = RecoverModuleOrNamespaceElements cenv parent endm envNS xml mutRecNSInfo defs
+
+          MutRecBindingChecking.RecoverMutRecDefns_UpdateNSContents nsInfo
+          
+          let env = 
+              if isNil enclosingNamespacePath then 
+                  envAtEnd
+              else
+                  let env = AddLocalRootModuleOrNamespace cenv.tcSink cenv.g cenv.amap m env mtypRoot
+
+                  // If the namespace is an interactive fragment e.g. FSI_0002, then open FSI_0002 in the subsequent environment
+                  let env = 
+                      match TryStripPrefixPath cenv.g enclosingNamespacePath with 
+                      | Some(p, _) -> RecoverOpenDecl cenv.tcSink cenv.g cenv.amap m.EndRange m.EndRange env [p]
+                      | None -> env
+
+                  // Publish the combined module type
+                  env.eModuleOrNamespaceTypeAccumulator := CombineCcuContentFragments m [!(env.eModuleOrNamespaceTypeAccumulator); mtypRoot]
+                  env
+          
+          let modExprRoot = BuildRootModuleExpr enclosingNamespacePath envNS.eCompPath modExpr
+
+          [modExprRoot], topAttrs, env, envAtEnd
+
+    with exn -> 
+        errorRecovery exn synDecl.Range 
+        [], [], env, env
+ 
+/// The non-mutually recursive case for a sequence of declarations
+and RecoverModuleOrNamespaceElementsNonMutRec cenv parent typeNames endm (exprsSoFar, attrsSoFar, env: RecoverEnv, envAtEnd: RecoverEnv) (moreDefs: SynModuleDecl list) =
+    match moreDefs with 
+    | (firstDef :: otherDefs) ->
+        // Lookahead one to find out the scope of the next declaration.
+        let scopem = 
+            if isNil otherDefs then unionRanges firstDef.Range endm
+            else unionRanges (List.head otherDefs).Range endm
+
+        // Possibly better:
+        //let scopem = unionRanges h1.Range.EndRange endm
+
+        let firstExpr', firstAttr', env', envAtEnd' = RecoverModuleOrNamespaceElementNonMutRec cenv parent typeNames scopem env firstDef
+        // tail recursive 
+        RecoverModuleOrNamespaceElementsNonMutRec  cenv parent typeNames endm (exprsSoFar@firstExpr', attrsSoFar@firstAttr', env', envAtEnd') otherDefs
+    | [] -> 
+        exprsSoFar, attrsSoFar, envAtEnd
+ 
+/// The mutually recursive case for a sequence of declarations (and nested modules)
+and RecoverModuleOrNamespaceElementsMutRec cenv parent typeNames endm envInitial mutRecNSInfo (defs: SynModuleDecl list) =
+    let m = match defs with [] -> endm | _ -> defs |> List.map (fun d -> d.Range) |> List.reduce unionRanges
+    let scopem = (defs, endm) ||> List.foldBack (fun h m -> unionRanges h.Range m) 
+
+    let (mutRecDefns, (_, _, synAttrs)) = 
+      let rec loop isNamespace attrs defs : (MutRecDefnsInitialData * _) = 
+        ((true, true, attrs), defs) ||> List.collectFold (fun (openOk, moduleAbbrevOk, attrs) def -> 
+            match ElimModuleDoBinding def with
+
+              | SynModuleDecl.Types (typeDefs, _) -> 
+                  let decls = typeDefs |> List.map MutRecShape.Tycon
+                  decls, (false, false, attrs)
+
+              | SynModuleDecl.Let (letrec, binds, m) -> 
+                  let binds = 
+                      if isNamespace then 
+                          CheckLetOrDoInNamespace binds m; []
+                      else
+                          if letrec then [MutRecShape.Lets binds]
+                          else List.map (List.singleton >> MutRecShape.Lets) binds
+                  binds, (false, false, attrs)
+
+              | SynModuleDecl.NestedModule(compInfo, isRec, synDefs, _isContinuingModule, _) -> 
+                  if isRec then warning(Error(FSComp.SR.tcRecImplied(), compInfo.Range))
+                  let mutRecDefs, (_, _, attrs) = loop false attrs synDefs 
+                  let decls = [MutRecShape.Module (compInfo, mutRecDefs)]
+                  decls, (false, false, attrs)
+
+              | SynModuleDecl.Open (LongIdentWithDots(lid, _), m) ->  
+                  if not openOk then errorR(Error(FSComp.SR.tcOpenFirstInMutRec(), m))
+                  let decls = [ MutRecShape.Open (MutRecDataForOpen(lid, m)) ]
+                  decls, (openOk, moduleAbbrevOk, attrs)
+
+              | SynModuleDecl.Exception (SynExceptionDefn(repr, members, _), _m) -> 
+                  let (SynExceptionDefnRepr(synAttrs, UnionCase(_, id, _args, _, _, _), _repr, doc, vis, m)) = repr
+                  let compInfo = ComponentInfo(synAttrs, [], [], [id], doc, false, vis, id.idRange)
+                  let decls = [ MutRecShape.Tycon(SynTypeDefn.TypeDefn(compInfo, SynTypeDefnRepr.Exception repr, members, m)) ]
+                  decls, (false, false, attrs)
+
+              | SynModuleDecl.HashDirective _ -> 
+                  [ ], (openOk, moduleAbbrevOk, attrs)
+
+              | SynModuleDecl.Attributes (synAttrs, _) -> 
+                  [ ], (false, false, synAttrs)
+
+              | SynModuleDecl.ModuleAbbrev (id, p, m) ->
+                  if not moduleAbbrevOk then errorR(Error(FSComp.SR.tcModuleAbbrevFirstInMutRec(), m))
+                  let decls = [ MutRecShape.ModuleAbbrev (MutRecDataForModuleAbbrev(id, p, m)) ]
+                  decls, (false, moduleAbbrevOk, attrs)
+
+              | SynModuleDecl.DoExpr _ -> failwith "unreachable: SynModuleDecl.DoExpr - ElimModuleDoBinding"
+
+              | (SynModuleDecl.NamespaceFragment _ as d) ->  error(Error(FSComp.SR.tcUnsupportedMutRecDecl(), d.Range)))
+
+      loop (match parent with ParentNone -> true | Parent _ -> false) [] defs
+
+    let tpenv = emptyUnscopedTyparEnv 
+    // TODO this call needs to a list
+    let mutRecDefnsChecked, envAfter = RecoverDeclarations.RecoverMutRecDefinitions cenv envInitial parent typeNames tpenv m scopem mutRecNSInfo mutRecDefns 
+
+    // Check the assembly attributes
+    let attrs, _ = RecoverAttributesWithPossibleTargets false cenv envAfter AttributeTargets.Top synAttrs
+
+    // Check the non-escaping condition
+    RecoverMutRecDefnsEscapeCheck mutRecDefnsChecked envInitial
+    let modExpr = RecoverMutRecDefsFinish cenv mutRecDefnsChecked m 
+
+    // TODO are we missing smaller increments here?
+    [modExpr], attrs, envAfter, envAfter
+
+and RecoverMutRecDefsFinish cenv defs m =
+    let tycons = defs |> List.choose (function MutRecShape.Tycon (Some tycon, _) -> Some tycon | _ -> None)
+    let binds = 
+        defs |> List.collect (function 
+            | MutRecShape.Open _ -> []
+            | MutRecShape.ModuleAbbrev _ -> []
+            | MutRecShape.Tycon (_, binds) 
+            | MutRecShape.Lets binds -> 
+                binds |> List.map ModuleOrNamespaceBinding.Binding 
+            | MutRecShape.Module ((MutRecDefnsPhase2DataForModule(mtypeAcc, mspec), _), mdefs) -> 
+                let mexpr = RecoverMutRecDefsFinish cenv mdefs m
+                mspec.entity_modul_contents <- MaybeLazy.Strict !mtypeAcc  
+                [ ModuleOrNamespaceBinding.Module(mspec, mexpr) ])
+
+    TMDefRec(true, tycons, binds, m)
+
+and RecoverModuleOrNamespaceElements cenv parent endm env xml mutRecNSInfo defs =
+    // Ensure the deref_nlpath call in UpdateAccModuleOrNamespaceType succeeds 
+    if cenv.compilingCanonicalFslibModuleType then 
+        ensureCcuHasModuleOrNamespaceAtPath cenv.topCcu env.ePath env.eCompPath (xml.ToXmlDoc())
+
+    // Collect the type names so we can implicitly add the compilation suffix to module names
+    let typeNames = EstablishTypeDefinitionCores.TypeNamesInNonMutRecDecls defs
+
+    match mutRecNSInfo with 
+    | Some _ -> 
+        let exprs, topAttrsNew, _, envAtEnd = RecoverModuleOrNamespaceElementsMutRec cenv parent typeNames endm env mutRecNSInfo defs
+        // Apply the functions for each declaration to build the overall expression-builder 
+        let mexpr = TMDefs(exprs) 
+        (mexpr, topAttrsNew, envAtEnd)
+
+    | None -> 
+        let exprs, attrs, envAtEnd = RecoverModuleOrNamespaceElementsNonMutRec cenv parent typeNames endm ([], [], env, env) defs 
+
+        let mexpr = TMDefs(exprs)
+        (mexpr, attrs, envAtEnd)
 
 //--------------------------------------------------------------------------
 // TypeCheckOneImplFile - Typecheck all the namespace fragments in a file.
