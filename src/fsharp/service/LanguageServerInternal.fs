@@ -213,7 +213,8 @@ type LSDelegate() as self =
            reactorOps: IReactorOperations,
            // Used by 'FSharpDeclarationListInfo' to check the IncrementalBuilder is still alive.
            checkAlive : (unit -> bool),
-           textSnapshotInfo : obj option) = 
+           textSnapshotInfo : obj option,
+           focus: range option) = 
         
         async {
             use _logBlock = Logger.LogBlock LogCompilerFunctionId.Service_CheckOneFile
@@ -309,7 +310,7 @@ type LSDelegate() as self =
                         let checkForErrors() = (parseResults.ParseHadErrors || errHandler.ErrorCount > 0)
                         // Typecheck is potentially a long running operation. We chop it up here with an Eventually continuation and, at each slice, give a chance
                         // for the client to claim the result as obsolete and have the typecheck abort.
-                        let check = TypeCheckOneInputAndFinishEventually(checkForErrors, tcConfig, tcImports, tcGlobals, None, TcResultsSink.WithSink sink, tcState, parsedMainInput)
+                        let check = TypeCheckOneInputAndFinishEventually(checkForErrors, tcConfig, tcImports, tcGlobals, None, TcResultsSink.WithSink sink, tcState, parsedMainInput, focus)
                         // TODO this defeats cancellation, convert to async at a lower level
                         let rec loop(check) = 
                             match check with 
@@ -400,7 +401,8 @@ type LSDelegate() as self =
          textSnapshotInfo: obj option,
          builder: IncrementalBuilder,
          tcPrior: PartialCheckResults,
-         creationErrors: FSharpErrorInfo[]) = 
+         creationErrors: FSharpErrorInfo[],
+         focus: range option) = 
     
         async {
             // Get additional script #load closure information if applicable.
@@ -408,12 +410,12 @@ type LSDelegate() as self =
             let loadClosure = scriptClosureCacheLock.AcquireLock (fun ltok -> scriptClosureCache.TryGet (ltok, options))
             let! tcErrors, tcFileResult = 
                 CheckOneFile(parseResults, source, fileName, options.ProjectFileName, tcPrior.TcConfig, tcPrior.TcGlobals, tcPrior.TcImports, 
-                            tcPrior.TcState, loadClosure, tcPrior.TcErrors, reactorOps, (fun () -> builder.IsAlive), textSnapshotInfo)
+                            tcPrior.TcState, loadClosure, tcPrior.TcErrors, reactorOps, (fun () -> builder.IsAlive), textSnapshotInfo, focus)
             return MakeCheckFileAnswer(fileName, tcFileResult, options, builder, Array.ofList tcPrior.TcDependencyFiles, creationErrors, parseResults.Errors, tcErrors)
         }
 
     /// Type-check the result obtained by parsing. Force the evaluation of the antecedent type checking context if needed.
-    member d.CheckFileInProject(parseResults: FSharpParseFileResults, filename, source, options, textSnapshotInfo) =
+    member d.CheckFileInProject(parseResults: FSharpParseFileResults, filename, source, options, textSnapshotInfo, focus: range option) =
         async {
             let! builderOpt,creationErrors, decrement = toAsync(getOrCreateBuilderAndKeepAlive(options))
             use _unwind = decrement
@@ -423,7 +425,7 @@ type LSDelegate() as self =
                 let! tcPrior = toAsync(builder.GetCheckResultsBeforeFileInProject (ctok, filename))
                 let parseTreeOpt = parseResults.ParseTree |> Option.map builder.DeduplicateParsedInputModuleNameInProject
                 let parseResultsAterDeDuplication = FSharpParseFileResults(parseResults.Errors, parseTreeOpt, parseResults.ParseHadErrors, parseResults.DependencyFiles)
-                let! checkAnswer = d.CheckOneFileImpl(parseResultsAterDeDuplication, source, filename, options, textSnapshotInfo, builder, tcPrior, creationErrors)
+                let! checkAnswer = d.CheckOneFileImpl(parseResultsAterDeDuplication, source, filename, options, textSnapshotInfo, builder, tcPrior, creationErrors, focus)
                 return checkAnswer
         }
 
@@ -468,11 +470,16 @@ type LSDelegate() as self =
         async {
             let parseOptions, _ = d.GetParsingOptionsFromProjectOptions(options)
             let parsed = d.Parse(parseOptions, file.FileName, source)
-            let! result = d.CheckFileInProject(parsed, file.FileName, source, options, None)
-            return result
+            let! check = d.CheckFileInProject(parsed, file.FileName, source, options, None, None)
+            return parsed, check
         }
 
     /// Check the expression around `focus`, and anything else that has been edited
     /// If the file has been extensively edited, this may fall back on `CheckFully`
-    member d.CheckIncrementally(options: FSharpProjectOptions, file: LSFile, source, _focus: pos) =
-        d.CheckFully(options, file, source)
+    member d.CheckIncrementally(options: FSharpProjectOptions, file: LSFile, source, focus: range) =
+        async {
+            let parseOptions, _ = d.GetParsingOptionsFromProjectOptions(options)
+            let parsed = d.Parse(parseOptions, file.FileName, source)
+            let! check = d.CheckFileInProject(parsed, file.FileName, source, options, None, Some(focus))
+            return parsed, check
+        }

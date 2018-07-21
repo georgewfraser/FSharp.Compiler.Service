@@ -44,8 +44,8 @@ type public LSDelegate =
     member Open: options: FSharpProjectOptions * filename: string -> LSFile
 
     /// Check the entire file, regardless of what has been checked previously
-    member CheckFully: options: FSharpProjectOptions * file: LSFile * source: string -> Async<FSharpCheckFileAnswer>
+    member CheckFully: options: FSharpProjectOptions * file: LSFile * source: string -> Async<FSharpParseFileResults * FSharpCheckFileAnswer>
 
     /// Check the expression around `focus`, and anything else that has been edited
     /// If the file has been extensively edited, this may fall back on `CheckFully`
-    member CheckIncrementally: options: FSharpProjectOptions * file: LSFile * source: string * focus: pos -> Async<FSharpCheckFileAnswer>
+    member CheckIncrementally: options: FSharpProjectOptions * file: LSFile * source: string * focus: range -> Async<FSharpParseFileResults * FSharpCheckFileAnswer>
